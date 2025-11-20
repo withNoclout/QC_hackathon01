@@ -1,5 +1,7 @@
-import { useState } from 'react';
-import { Activity, CheckCircle, XCircle, RefreshCw, Settings, History } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import { Activity, CheckCircle, XCircle, RefreshCw, Settings, History, Camera } from 'lucide-react';
+import * as tf from '@tensorflow/tfjs';
+import * as cocoSsd from '@tensorflow-models/coco-ssd';
 
 function Dashboard() {
   const [stats, setStats] = useState({ total: 120, pass: 115, fail: 5 });
@@ -11,6 +13,214 @@ function Dashboard() {
     { id: 3, time: '10:00:12', status: 'FAIL', confidence: 0.45 },
     { id: 4, time: '10:00:15', status: 'PASS', confidence: 0.99 },
   ]);
+  const [model, setModel] = useState(null);
+  const [isCameraReady, setIsCameraReady] = useState(false);
+  const [referenceImage, setReferenceImage] = useState(null);
+  const [similarity, setSimilarity] = useState(0);
+  
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const referenceCanvasRef = useRef(null);
+
+  // Helper: Compare two image data arrays (Simple Pixel Diff)
+  const calculateSimilarity = (imgData1, imgData2) => {
+    let diff = 0;
+    const totalPixels = imgData1.data.length / 4; // RGBA
+    
+    for (let i = 0; i < imgData1.data.length; i += 4) {
+      // Compare RGB channels
+      const rDiff = Math.abs(imgData1.data[i] - imgData2.data[i]);
+      const gDiff = Math.abs(imgData1.data[i + 1] - imgData2.data[i + 1]);
+      const bDiff = Math.abs(imgData1.data[i + 2] - imgData2.data[i + 2]);
+      
+      diff += (rDiff + gDiff + bDiff) / 3;
+    }
+    
+    const avgDiff = diff / totalPixels;
+    // Invert diff to get similarity (0 diff = 100% similar)
+    // 255 is max difference per pixel
+    return Math.max(0, 100 - (avgDiff / 255 * 100));
+  };
+
+  const captureReference = () => {
+    if (!videoRef.current || !canvasRef.current) return;
+    
+    // Capture the current video frame to a hidden canvas
+    const video = videoRef.current;
+    const canvas = document.createElement('canvas');
+    canvas.width = 100; // Small size for comparison
+    canvas.height = 100;
+    const ctx = canvas.getContext('2d');
+    
+    // Draw the center of the video (assuming object is centered)
+    // Or better: if we have a detection, crop that. 
+    // For simplicity in this hackathon, we'll capture the center square.
+    const size = Math.min(video.videoWidth, video.videoHeight) * 0.6;
+    const sx = (video.videoWidth - size) / 2;
+    const sy = (video.videoHeight - size) / 2;
+    
+    ctx.drawImage(video, sx, sy, size, size, 0, 0, 100, 100);
+    
+    const imageData = ctx.getImageData(0, 0, 100, 100);
+    setReferenceImage(imageData);
+    
+    // Show preview
+    if (referenceCanvasRef.current) {
+      const refCtx = referenceCanvasRef.current.getContext('2d');
+      referenceCanvasRef.current.width = 100;
+      referenceCanvasRef.current.height = 100;
+      refCtx.putImageData(imageData, 0, 0);
+    }
+    
+    console.log("Reference captured!");
+  };
+
+  // Load Model
+  useEffect(() => {
+    const loadModel = async () => {
+      try {
+        await tf.ready();
+        const loadedModel = await cocoSsd.load();
+        setModel(loadedModel);
+        console.log('COCO-SSD Model loaded.');
+      } catch (err) {
+        console.error('Failed to load model', err);
+      }
+    };
+    loadModel();
+  }, []);
+
+  // Setup Camera
+  useEffect(() => {
+    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+      const startVideo = async () => {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: 'environment' },
+            audio: false,
+          });
+          if (videoRef.current) {
+            videoRef.current.srcObject = stream;
+            videoRef.current.onloadedmetadata = () => {
+              setIsCameraReady(true);
+              videoRef.current.play();
+            };
+          }
+        } catch (err) {
+          console.error('Error accessing webcam:', err);
+        }
+      };
+      startVideo();
+    }
+  }, []);
+
+  // Detection Loop
+  useEffect(() => {
+    let animationId;
+
+    const detect = async () => {
+      if (model && isCameraReady && videoRef.current && canvasRef.current) {
+        const video = videoRef.current;
+        const canvas = canvasRef.current;
+        const ctx = canvas.getContext('2d');
+
+        // Match canvas size to video size
+        if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+        }
+
+        // Detect objects
+        const predictions = await model.detect(video);
+
+        // Clear canvas
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        // Find the largest object (closest)
+        let largestPrediction = null;
+        let maxArea = 0;
+
+        predictions.forEach((prediction) => {
+          const [x, y, width, height] = prediction.bbox;
+          const area = width * height;
+          if (area > maxArea) {
+            maxArea = area;
+            largestPrediction = prediction;
+          }
+        });
+
+        // Draw bounding box for the largest object
+        if (largestPrediction) {
+          const [x, y, width, height] = largestPrediction.bbox;
+          
+          // Draw Box
+          ctx.strokeStyle = '#00FF00'; // Green
+          ctx.lineWidth = 4;
+          ctx.strokeRect(x, y, width, height);
+
+          // --- QUALITY CHECK LOGIC ---
+          let currentStatus = 'IDLE';
+          let currentScore = 0;
+
+          if (referenceImage) {
+            // 1. Extract the detected object
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = 100;
+            tempCanvas.height = 100;
+            const tempCtx = tempCanvas.getContext('2d');
+            
+            // Draw the detected area resized to 100x100
+            tempCtx.drawImage(video, x, y, width, height, 0, 0, 100, 100);
+            const currentObjectData = tempCtx.getImageData(0, 0, 100, 100);
+            
+            // 2. Compare with Reference
+            const simScore = calculateSimilarity(referenceImage, currentObjectData);
+            setSimilarity(simScore);
+            currentScore = simScore;
+
+            // 3. Decide Pass/Fail
+            if (simScore > (threshold * 100)) {
+              currentStatus = 'PASS';
+              ctx.strokeStyle = '#00FF00'; // Green
+            } else {
+              currentStatus = 'FAIL';
+              ctx.strokeStyle = '#FF0000'; // Red
+              ctx.strokeRect(x, y, width, height); // Redraw red
+            }
+          } else {
+            // No reference set yet
+            ctx.strokeStyle = '#FFFF00'; // Yellow
+            ctx.strokeRect(x, y, width, height);
+          }
+
+          // Draw Label
+          ctx.fillStyle = currentStatus === 'FAIL' ? '#FF0000' : '#00FF00';
+          ctx.font = '18px Arial';
+          const label = referenceImage 
+            ? `${currentStatus} (${Math.round(currentScore)}% Match)`
+            : `${largestPrediction.class} (No Ref)`;
+            
+          ctx.fillText(label, x, y > 20 ? y - 5 : 20);
+          
+          // Update global status (debounced slightly in real app)
+          setStatus(currentStatus);
+          
+        } else {
+             setStatus('IDLE');
+        }
+      }
+      animationId = requestAnimationFrame(detect);
+    };
+
+    if (model && isCameraReady) {
+      detect();
+    }
+
+    return () => {
+      if (animationId) cancelAnimationFrame(animationId);
+    };
+  }, [model, isCameraReady, threshold]);
+
 
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 p-6 font-sans">
@@ -32,15 +242,32 @@ function Dashboard() {
         <div className="lg:col-span-2 space-y-6">
           {/* Video Feed Card */}
           <div className="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden shadow-lg relative group">
-            <div className="absolute top-4 left-4 bg-black/50 backdrop-blur px-3 py-1 rounded-full text-xs font-mono text-white z-10">
-              LIVE FEED
+            <div className="absolute top-4 left-4 bg-black/50 backdrop-blur px-3 py-1 rounded-full text-xs font-mono text-white z-10 flex items-center gap-2">
+              <Camera className="w-3 h-3" />
+              LIVE FEED {model ? '(AI ACTIVE)' : '(LOADING AI...)'}
             </div>
-            <div className="aspect-video bg-black flex items-center justify-center text-slate-600">
-              {/* Placeholder for MJPEG Stream */}
-              <div className="text-center">
-                <Activity className="w-16 h-16 mx-auto mb-4 opacity-20" />
-                <p>Waiting for Camera Stream...</p>
-              </div>
+            <div className="aspect-video bg-black flex items-center justify-center text-slate-600 relative">
+              
+              {/* Video Element */}
+              <video 
+                ref={videoRef}
+                className="absolute inset-0 w-full h-full object-contain"
+                muted
+                playsInline
+              />
+              
+              {/* Canvas Overlay for Bounding Boxes */}
+              <canvas 
+                ref={canvasRef}
+                className="absolute inset-0 w-full h-full object-contain pointer-events-none"
+              />
+
+              {!isCameraReady && (
+                <div className="text-center z-10">
+                  <Activity className="w-16 h-16 mx-auto mb-4 opacity-20 animate-pulse" />
+                  <p>Initializing Camera & AI...</p>
+                </div>
+              )}
             </div>
             
             {/* Live Status Overlay (Simulated) */}
@@ -94,10 +321,30 @@ function Dashboard() {
               <Settings className="w-5 h-5 text-blue-400" />
               <h2 className="font-semibold">Configuration</h2>
             </div>
+
+            {/* Reference Image Section */}
+            <div className="bg-slate-900/50 p-4 rounded-lg border border-slate-700 mb-4">
+              <h3 className="text-sm font-medium text-slate-300 mb-3">Golden Sample (Reference)</h3>
+              <div className="flex items-center gap-4">
+                <div className="w-16 h-16 bg-black rounded border border-slate-600 overflow-hidden">
+                  <canvas ref={referenceCanvasRef} className="w-full h-full object-cover" />
+                </div>
+                <button 
+                  onClick={captureReference}
+                  className="flex-1 py-2 px-3 bg-blue-600 hover:bg-blue-500 text-white text-sm rounded transition-colors flex items-center justify-center gap-2"
+                >
+                  <Camera className="w-4 h-4" />
+                  Set Reference
+                </button>
+              </div>
+              <p className="text-xs text-slate-500 mt-2">
+                Place a perfect product in the frame and click to set it as the standard.
+              </p>
+            </div>
             
             <div>
               <div className="flex justify-between text-sm mb-2">
-                <span className="text-slate-400">Confidence Threshold</span>
+                <span className="text-slate-400">Similarity Threshold</span>
                 <span className="text-blue-400 font-mono">{(threshold * 100).toFixed(0)}%</span>
               </div>
               <input 
