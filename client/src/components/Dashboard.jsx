@@ -18,7 +18,14 @@ function Dashboard() {
   const [referenceImage, setReferenceImage] = useState(null);
   const [similarity, setSimilarity] = useState(0);
   
+  // Camera Settings
+  const [cameraMode, setCameraMode] = useState('ip'); // Default to IP Camera
+  const [streamUrl, setStreamUrl] = useState('http://192.168.1.101/stream');
+  const [streamError, setStreamError] = useState(false);
+  const [enableAI, setEnableAI] = useState(true); // Toggle for CORS/AI
+
   const videoRef = useRef(null);
+  const imageRef = useRef(null); // For IP Camera
   const canvasRef = useRef(null);
   const referenceCanvasRef = useRef(null);
 
@@ -43,36 +50,46 @@ function Dashboard() {
   };
 
   const captureReference = () => {
-    if (!videoRef.current || !canvasRef.current) return;
+    if (!canvasRef.current) return;
     
+    let source = null;
+    if (cameraMode === 'webcam' && videoRef.current) source = videoRef.current;
+    if (cameraMode === 'ip' && imageRef.current) source = imageRef.current;
+    
+    if (!source) return;
+
     // Capture the current video frame to a hidden canvas
-    const video = videoRef.current;
     const canvas = document.createElement('canvas');
     canvas.width = 100; // Small size for comparison
     canvas.height = 100;
     const ctx = canvas.getContext('2d');
     
+    const width = source.videoWidth || source.naturalWidth;
+    const height = source.videoHeight || source.naturalHeight;
+    
     // Draw the center of the video (assuming object is centered)
-    // Or better: if we have a detection, crop that. 
-    // For simplicity in this hackathon, we'll capture the center square.
-    const size = Math.min(video.videoWidth, video.videoHeight) * 0.6;
-    const sx = (video.videoWidth - size) / 2;
-    const sy = (video.videoHeight - size) / 2;
+    const size = Math.min(width, height) * 0.6;
+    const sx = (width - size) / 2;
+    const sy = (height - size) / 2;
     
-    ctx.drawImage(video, sx, sy, size, size, 0, 0, 100, 100);
-    
-    const imageData = ctx.getImageData(0, 0, 100, 100);
-    setReferenceImage(imageData);
-    
-    // Show preview
-    if (referenceCanvasRef.current) {
-      const refCtx = referenceCanvasRef.current.getContext('2d');
-      referenceCanvasRef.current.width = 100;
-      referenceCanvasRef.current.height = 100;
-      refCtx.putImageData(imageData, 0, 0);
+    // Use try-catch for CORS issues with IP Camera
+    try {
+      ctx.drawImage(source, sx, sy, size, size, 0, 0, 100, 100);
+      const imageData = ctx.getImageData(0, 0, 100, 100);
+      setReferenceImage(imageData);
+      
+      // Show preview
+      if (referenceCanvasRef.current) {
+        const refCtx = referenceCanvasRef.current.getContext('2d');
+        referenceCanvasRef.current.width = 100;
+        referenceCanvasRef.current.height = 100;
+        refCtx.putImageData(imageData, 0, 0);
+      }
+      console.log("Reference captured!");
+    } catch (e) {
+      console.error("Error capturing reference (likely CORS):", e);
+      alert("Cannot capture reference from IP Camera due to browser security (CORS).");
     }
-    
-    console.log("Reference captured!");
   };
 
   // Load Model
@@ -92,7 +109,7 @@ function Dashboard() {
 
   // Setup Camera
   useEffect(() => {
-    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+    if (cameraMode === 'webcam' && navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
       const startVideo = async () => {
         try {
           const stream = await navigator.mediaDevices.getUserMedia({
@@ -111,43 +128,71 @@ function Dashboard() {
         }
       };
       startVideo();
+    } else {
+        // Stop webcam if switching to IP or other mode
+        if (videoRef.current && videoRef.current.srcObject) {
+            const tracks = videoRef.current.srcObject.getTracks();
+            tracks.forEach(track => track.stop());
+            videoRef.current.srcObject = null;
+        }
     }
-  }, []);
+  }, [cameraMode]);
 
   // Detection Loop
   useEffect(() => {
     let animationId;
 
     const detect = async () => {
-      if (model && isCameraReady && videoRef.current && canvasRef.current) {
-        const video = videoRef.current;
-        const canvas = canvasRef.current;
-        const ctx = canvas.getContext('2d');
-
-        // Match canvas size to video size
-        if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
-          canvas.width = video.videoWidth;
-          canvas.height = video.videoHeight;
+      if (model && canvasRef.current) {
+        let source = null;
+        
+        // Check which source is ready
+        if (cameraMode === 'webcam' && videoRef.current && videoRef.current.readyState === 4) {
+          source = videoRef.current;
+        } else if (cameraMode === 'ip' && imageRef.current && imageRef.current.complete) {
+          source = imageRef.current;
         }
 
-        // Detect objects
-        const predictions = await model.detect(video);
+        if (source) {
+          const videoWidth = source.videoWidth || source.naturalWidth;
+          const videoHeight = source.videoHeight || source.naturalHeight;
 
-        // Clear canvas
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-        // Find the largest object (closest)
-        let largestPrediction = null;
-        let maxArea = 0;
-
-        predictions.forEach((prediction) => {
-          const [x, y, width, height] = prediction.bbox;
-          const area = width * height;
-          if (area > maxArea) {
-            maxArea = area;
-            largestPrediction = prediction;
+          // Ensure canvas matches source dimensions
+          if (videoWidth > 0 && videoHeight > 0) {
+             if (canvasRef.current.width !== videoWidth || canvasRef.current.height !== videoHeight) {
+                canvasRef.current.width = videoWidth;
+                canvasRef.current.height = videoHeight;
+                // Also update videoRef size if it's webcam to ensure overlay matches
+                if (cameraMode === 'webcam' && videoRef.current) {
+                    videoRef.current.width = videoWidth;
+                    videoRef.current.height = videoHeight;
+                }
+             }
           }
-        });
+
+          // Detect objects
+          let predictions = [];
+          try {
+             predictions = await model.detect(source);
+          } catch (e) {
+             // console.warn("Detection error:", e);
+          }
+
+          const ctx = canvasRef.current.getContext('2d');
+          ctx.clearRect(0, 0, videoWidth, videoHeight);
+
+          // Find the largest object (assuming it's the product)
+          let largestPrediction = null;
+          let maxArea = 0;
+          
+          predictions.forEach(prediction => {
+            const [x, y, width, height] = prediction.bbox;
+            const area = width * height;
+            if (area > maxArea) {
+              maxArea = area;
+              largestPrediction = prediction;
+            }
+          });
 
         // Draw bounding box for the largest object
         if (largestPrediction) {
@@ -169,23 +214,27 @@ function Dashboard() {
             tempCanvas.height = 100;
             const tempCtx = tempCanvas.getContext('2d');
             
-            // Draw the detected area resized to 100x100
-            tempCtx.drawImage(video, x, y, width, height, 0, 0, 100, 100);
-            const currentObjectData = tempCtx.getImageData(0, 0, 100, 100);
-            
-            // 2. Compare with Reference
-            const simScore = calculateSimilarity(referenceImage, currentObjectData);
-            setSimilarity(simScore);
-            currentScore = simScore;
+            try {
+                // Draw the detected area resized to 100x100
+                tempCtx.drawImage(source, x, y, width, height, 0, 0, 100, 100);
+                const currentObjectData = tempCtx.getImageData(0, 0, 100, 100);
+                
+                // 2. Compare with Reference
+                const simScore = calculateSimilarity(referenceImage, currentObjectData);
+                setSimilarity(simScore);
+                currentScore = simScore;
 
-            // 3. Decide Pass/Fail
-            if (simScore > (threshold * 100)) {
-              currentStatus = 'PASS';
-              ctx.strokeStyle = '#00FF00'; // Green
-            } else {
-              currentStatus = 'FAIL';
-              ctx.strokeStyle = '#FF0000'; // Red
-              ctx.strokeRect(x, y, width, height); // Redraw red
+                // 3. Decide Pass/Fail
+                if (simScore > (threshold * 100)) {
+                currentStatus = 'PASS';
+                ctx.strokeStyle = '#00FF00'; // Green
+                } else {
+                currentStatus = 'FAIL';
+                ctx.strokeStyle = '#FF0000'; // Red
+                ctx.strokeRect(x, y, width, height); // Redraw red
+                }
+            } catch (e) {
+                // CORS error likely
             }
           } else {
             // No reference set yet
@@ -209,17 +258,18 @@ function Dashboard() {
              setStatus('IDLE');
         }
       }
+      }
       animationId = requestAnimationFrame(detect);
     };
 
-    if (model && isCameraReady) {
+    if (model) {
       detect();
     }
 
     return () => {
       if (animationId) cancelAnimationFrame(animationId);
     };
-  }, [model, isCameraReady, threshold]);
+  }, [model, isCameraReady, threshold, cameraMode]);
 
 
   return (
@@ -248,13 +298,40 @@ function Dashboard() {
             </div>
             <div className="aspect-video bg-black flex items-center justify-center text-slate-600 relative">
               
-              {/* Video Element */}
+              {/* Video Element (Webcam) */}
               <video 
                 ref={videoRef}
-                className="absolute inset-0 w-full h-full object-contain"
+                className={`absolute inset-0 w-full h-full object-contain ${cameraMode === 'webcam' ? 'block' : 'hidden'}`}
                 muted
                 playsInline
               />
+
+              {/* Image Element (IP Camera) */}
+              <img
+                ref={imageRef}
+                src={streamUrl}
+                crossOrigin={enableAI ? "anonymous" : undefined}
+                alt="IP Camera Stream"
+                className={`absolute inset-0 w-full h-full object-contain ${cameraMode === 'ip' ? 'block' : 'hidden'}`}
+                onLoad={() => setStreamError(false)}
+                onError={(e) => {
+                    console.error("Error loading IP stream");
+                    setStreamError(true);
+                }}
+              />
+
+              {streamError && cameraMode === 'ip' && (
+                 <div className="absolute inset-0 flex items-center justify-center bg-slate-900/90 z-20">
+                    <div className="text-center p-4">
+                        <p className="text-red-400 font-bold mb-2">Stream Connection Failed</p>
+                        <ul className="text-sm text-slate-300 text-left space-y-1">
+                            <li>• Check IP Address in Arduino Serial Monitor</li>
+                            <li>• Ensure PC and ESP32 are on same WiFi</li>
+                            <li>• Try disabling "Enable AI" to test connection</li>
+                        </ul>
+                    </div>
+                 </div>
+              )}
               
               {/* Canvas Overlay for Bounding Boxes */}
               <canvas 
@@ -262,7 +339,7 @@ function Dashboard() {
                 className="absolute inset-0 w-full h-full object-contain pointer-events-none"
               />
 
-              {!isCameraReady && (
+              {!isCameraReady && cameraMode === 'webcam' && (
                 <div className="text-center z-10">
                   <Activity className="w-16 h-16 mx-auto mb-4 opacity-20 animate-pulse" />
                   <p>Initializing Camera & AI...</p>
@@ -320,6 +397,58 @@ function Dashboard() {
             <div className="flex items-center gap-2 mb-4">
               <Settings className="w-5 h-5 text-blue-400" />
               <h2 className="font-semibold">Configuration</h2>
+            </div>
+
+            {/* Camera Source Selection */}
+            <div className="bg-slate-900/50 p-4 rounded-lg border border-slate-700 mb-4">
+              <h3 className="text-sm font-medium text-slate-300 mb-3">Camera Source</h3>
+              <div className="flex gap-2 mb-3">
+                <button 
+                  onClick={() => setCameraMode('webcam')}
+                  className={`flex-1 py-2 text-xs rounded ${cameraMode === 'webcam' ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-400'}`}
+                >
+                  Webcam
+                </button>
+                <button 
+                  onClick={() => setCameraMode('ip')}
+                  className={`flex-1 py-2 text-xs rounded ${cameraMode === 'ip' ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-400'}`}
+                >
+                  IP Camera
+                </button>
+              </div>
+              
+              {cameraMode === 'ip' && (
+                <div className="space-y-2">
+                  <label className="text-xs text-slate-500">Stream URL</label>
+                  <input 
+                    type="text" 
+                    value={streamUrl}
+                    onChange={(e) => {
+                        setStreamUrl(e.target.value);
+                        setStreamError(false);
+                    }}
+                    className="w-full bg-slate-800 border border-slate-600 rounded px-2 py-1 text-xs text-white mb-2"
+                    placeholder="http://192.168.1.101/stream"
+                  />
+                  <div className="flex items-center gap-2">
+                    <input 
+                        type="checkbox" 
+                        id="enableAI"
+                        checked={enableAI}
+                        onChange={(e) => setEnableAI(e.target.checked)}
+                        className="rounded bg-slate-800 border-slate-600"
+                    />
+                    <label htmlFor="enableAI" className="text-xs text-slate-400">
+                        Enable AI (Requires CORS)
+                    </label>
+                  </div>
+                  {!enableAI && (
+                      <p className="text-[10px] text-yellow-500 mt-1">
+                          AI disabled. Video should load even if CORS fails.
+                      </p>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* Reference Image Section */}
