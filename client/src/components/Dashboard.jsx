@@ -28,6 +28,7 @@ function Dashboard() {
   const imageRef = useRef(null); // For IP Camera
   const canvasRef = useRef(null);
   const referenceCanvasRef = useRef(null);
+  const tempCanvasRef = useRef(document.createElement('canvas')); // Reusable canvas for processing
 
   // Helper: Compare two image data arrays (Simple Pixel Diff)
   const calculateSimilarity = (imgData1, imgData2) => {
@@ -141,8 +142,26 @@ function Dashboard() {
   // Detection Loop
   useEffect(() => {
     let animationId;
+    let lastFrameTime = 0;
+    const FPS_LIMIT = 10; // Limit AI processing to 10 FPS to save resources for video rendering
 
-    const detect = async () => {
+    const detect = async (timestamp) => {
+      if (!enableAI) {
+        // If AI is disabled, clear canvas and loop slowly just to check for re-enable
+        if (canvasRef.current) {
+            const ctx = canvasRef.current.getContext('2d');
+            ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+        }
+        animationId = requestAnimationFrame(detect);
+        return;
+      }
+
+      if (timestamp - lastFrameTime < (1000 / FPS_LIMIT)) {
+        animationId = requestAnimationFrame(detect);
+        return;
+      }
+      lastFrameTime = timestamp;
+
       if (model && canvasRef.current) {
         let source = null;
         
@@ -209,10 +228,11 @@ function Dashboard() {
 
           if (referenceImage) {
             // 1. Extract the detected object
-            const tempCanvas = document.createElement('canvas');
+            // Reuse the temp canvas instead of creating a new one every frame
+            const tempCanvas = tempCanvasRef.current;
             tempCanvas.width = 100;
             tempCanvas.height = 100;
-            const tempCtx = tempCanvas.getContext('2d');
+            const tempCtx = tempCanvas.getContext('2d', { willReadFrequently: true });
             
             try {
                 // Draw the detected area resized to 100x100
@@ -263,13 +283,13 @@ function Dashboard() {
     };
 
     if (model) {
-      detect();
+      requestAnimationFrame(detect);
     }
 
     return () => {
       if (animationId) cancelAnimationFrame(animationId);
     };
-  }, [model, isCameraReady, threshold, cameraMode]);
+  }, [model, isCameraReady, threshold, cameraMode, enableAI]);
 
 
   return (
@@ -312,7 +332,7 @@ function Dashboard() {
                 src={streamUrl}
                 crossOrigin={enableAI ? "anonymous" : undefined}
                 alt="IP Camera Stream"
-                className={`absolute inset-0 w-full h-full object-contain ${cameraMode === 'ip' ? 'block' : 'hidden'}`}
+                className={`absolute inset-0 w-full h-full object-contain ${cameraMode === 'ip' && !streamError ? 'block' : 'hidden'}`}
                 onLoad={() => setStreamError(false)}
                 onError={(e) => {
                     console.error("Error loading IP stream");
@@ -321,15 +341,10 @@ function Dashboard() {
               />
 
               {streamError && cameraMode === 'ip' && (
-                 <div className="absolute inset-0 flex items-center justify-center bg-slate-900/90 z-20">
-                    <div className="text-center p-4">
-                        <p className="text-red-400 font-bold mb-2">Stream Connection Failed</p>
-                        <ul className="text-sm text-slate-300 text-left space-y-1">
-                            <li>• Check IP Address in Arduino Serial Monitor</li>
-                            <li>• Ensure PC and ESP32 are on same WiFi</li>
-                            <li>• Try disabling "Enable AI" to test connection</li>
-                        </ul>
-                    </div>
+                 <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-900/90 z-20">
+                    <RefreshCw className="w-10 h-10 text-blue-500 animate-spin mb-4" />
+                    <p className="text-slate-300 font-medium">Connecting to Camera...</p>
+                    <p className="text-xs text-slate-500 mt-2">Please wait...</p>
                  </div>
               )}
               

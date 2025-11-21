@@ -44,6 +44,7 @@ A real-time quality control system using a webcam to inspect products. Originall
 - [x] **Hardware Integration (Camera)**:
     - Configured ESP32-CAM with custom firmware (CORS enabled, MJPEG stream).
     - Integrated IP Camera stream into Dashboard.
+    - **Optimized Performance**: Reduced latency (buffer count 1) and improved framerate (QVGA resolution).
 
 ### Phase 4: Integration & Testing
 - [x] **Client-Side POC**: Verify webcam access and object detection in browser.
@@ -56,6 +57,12 @@ A real-time quality control system using a webcam to inspect products. Originall
     - Created custom firmware for ESP32-CAM to support CORS and MJPEG streaming.
     - Updated Dashboard to support switching between Webcam and IP Camera.
     - Validated ESP32-CAM integration.
+    - **Performance Tuning**:
+        - Reduced ESP32-CAM buffer to 1 to fix 3-second latency.
+        - Lowered resolution to QVGA for higher FPS.
+        - Throttled Client-side AI to 10 FPS to prevent CPU starvation.
+        - Added "Enable AI" toggle to allow raw stream viewing.
+        - Added "Loading Circle" animation for stream interruptions.
 - **2025-11-20**: 
     - Pivoted to Frontend-first approach due to missing hardware.
     - Implemented Login/Auth with session timeout.
