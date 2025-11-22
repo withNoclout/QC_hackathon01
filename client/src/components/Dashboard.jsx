@@ -23,6 +23,7 @@ function Dashboard() {
   const [streamUrl, setStreamUrl] = useState('http://192.168.1.101/stream');
   const [streamError, setStreamError] = useState(false);
   const [enableAI, setEnableAI] = useState(true); // Toggle for CORS/AI
+  const [retryCount, setRetryCount] = useState(0); // Force re-render to retry connection
 
   const videoRef = useRef(null);
   const imageRef = useRef(null); // For IP Camera
@@ -138,6 +139,17 @@ function Dashboard() {
         }
     }
   }, [cameraMode]);
+
+  // Auto-retry logic for IP Camera
+  useEffect(() => {
+    let retryInterval;
+    if (streamError && cameraMode === 'ip') {
+        retryInterval = setInterval(() => {
+            setRetryCount(prev => prev + 1);
+        }, 2000); // Retry every 2 seconds
+    }
+    return () => clearInterval(retryInterval);
+  }, [streamError, cameraMode]);
 
   // Detection Loop
   useEffect(() => {
@@ -328,8 +340,9 @@ function Dashboard() {
 
               {/* Image Element (IP Camera) */}
               <img
+                key={`${streamUrl}-${retryCount}`} // Force re-mount on retry
                 ref={imageRef}
-                src={streamUrl}
+                src={streamUrl} // Removed timestamp to fix MJPEG stream breaking
                 crossOrigin={enableAI ? "anonymous" : undefined}
                 alt="IP Camera Stream"
                 className={`absolute inset-0 w-full h-full object-contain ${cameraMode === 'ip' && !streamError ? 'block' : 'hidden'}`}
@@ -344,7 +357,7 @@ function Dashboard() {
                  <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-900/90 z-20">
                     <RefreshCw className="w-10 h-10 text-blue-500 animate-spin mb-4" />
                     <p className="text-slate-300 font-medium">Connecting to Camera...</p>
-                    <p className="text-xs text-slate-500 mt-2">Please wait...</p>
+                    <p className="text-xs text-slate-500 mt-2">Auto-retrying...</p>
                  </div>
               )}
               
