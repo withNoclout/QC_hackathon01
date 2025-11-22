@@ -9,8 +9,8 @@
 #include "esp_http_server.h"
 
 // Replace with your network credentials
-const char* ssid = "YOUR_WIFI_SSID";
-const char* password = "YOUR_WIFI_PASSWORD";
+const char* ssid = "Amplimited18";
+const char* password = "ammamp242";
 
 #define PART_BOUNDARY "123456789000000000000987654321"
 
@@ -56,6 +56,8 @@ static esp_err_t qc_stream_handler(httpd_req_t *req){
   httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
   httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "GET");
   httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "*");
+  // Fix for Chrome/Edge "Private Network Access" (Localhost -> 192.168.x.x)
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Private-Network", "true");
 
   res = httpd_resp_set_type(req, _STREAM_CONTENT_TYPE);
   if(res != ESP_OK){
@@ -107,6 +109,46 @@ static esp_err_t qc_stream_handler(httpd_req_t *req){
   return res;
 }
 
+esp_err_t qc_capture_handler(httpd_req_t *req){
+  camera_fb_t * fb = NULL;
+  esp_err_t res = ESP_OK;
+  
+  // CORS Headers
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "GET");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "*");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Private-Network", "true");
+
+  fb = esp_camera_fb_get();
+  if (!fb) {
+    Serial.println("Camera capture failed");
+    httpd_resp_send_500(req);
+    return ESP_FAIL;
+  }
+  
+  httpd_resp_set_type(req, "image/jpeg");
+  httpd_resp_set_hdr(req, "Content-Disposition", "inline; filename=capture.jpg");
+  
+  if(fb->format == PIXFORMAT_JPEG){
+    res = httpd_resp_send(req, (const char *)fb->buf, fb->len);
+  } else {
+    size_t _jpg_buf_len = 0;
+    uint8_t * _jpg_buf = NULL;
+    bool jpeg_converted = frame2jpg(fb, 80, &_jpg_buf, &_jpg_buf_len);
+    if(!jpeg_converted){
+       Serial.println("JPEG compression failed");
+       httpd_resp_send_500(req);
+       res = ESP_FAIL;
+    } else {
+       res = httpd_resp_send(req, (const char *)_jpg_buf, _jpg_buf_len);
+       free(_jpg_buf);
+    }
+  }
+  
+  esp_camera_fb_return(fb);
+  return res;
+}
+
 void startQCServer(){
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.server_port = 80;
@@ -118,8 +160,16 @@ void startQCServer(){
     .user_ctx  = NULL
   };
 
+  httpd_uri_t capture_uri = {
+    .uri       = "/capture",
+    .method    = HTTP_GET,
+    .handler   = qc_capture_handler,
+    .user_ctx  = NULL
+  };
+
   if (httpd_start(&qc_stream_httpd, &config) == ESP_OK) {
     httpd_register_uri_handler(qc_stream_httpd, &stream_uri);
+    httpd_register_uri_handler(qc_stream_httpd, &capture_uri);
   }
 }
 
@@ -153,11 +203,11 @@ void setup() {
   config.pixel_format = PIXFORMAT_JPEG; 
   
   if(psramFound()){
-    config.frame_size = FRAMESIZE_QVGA; // 320x240
-    config.jpeg_quality = 12; 
-    config.fb_count = 1; // Reduce buffering to decrease latency
+    config.frame_size = FRAMESIZE_VGA; // 640x480
+    config.jpeg_quality = 12; // Balanced quality
+    config.fb_count = 1; // 1 buffer is safer for stability
   } else {
-    config.frame_size = FRAMESIZE_QVGA;
+    config.frame_size = FRAMESIZE_CIF; // 400x296 (Fallback if no PSRAM)
     config.jpeg_quality = 12;
     config.fb_count = 1;
   }

@@ -3,7 +3,7 @@ import { Activity, CheckCircle, XCircle, RefreshCw, Settings, History, Camera } 
 import * as tf from '@tensorflow/tfjs';
 import * as cocoSsd from '@tensorflow-models/coco-ssd';
 
-function Dashboard() {
+function Dashboard({ onNavigate, streamUrl, setStreamUrl }) {
   const [stats, setStats] = useState({ total: 120, pass: 115, fail: 5 });
   const [threshold, setThreshold] = useState(0.85);
   const [status, setStatus] = useState('IDLE'); // PASS, FAIL, IDLE
@@ -20,10 +20,16 @@ function Dashboard() {
   
   // Camera Settings
   const [cameraMode, setCameraMode] = useState('ip'); // Default to IP Camera
-  const [streamUrl, setStreamUrl] = useState('http://192.168.1.101/stream');
+  // const [streamUrl, setStreamUrl] = useState('http://192.168.1.101/stream'); // Lifted to App
   const [streamError, setStreamError] = useState(false);
   const [enableAI, setEnableAI] = useState(true); // Toggle for CORS/AI
   const [retryCount, setRetryCount] = useState(0); // Force re-render to retry connection
+  const [autoCrop, setAutoCrop] = useState(true); // New state for Auto-Crop
+  
+  // New State for Backend Analysis
+  const [analysisMode, setAnalysisMode] = useState('ssim'); // 'ssim' | 'cnn'
+  const [analysisResult, setAnalysisResult] = useState(null);
+  const [isTraining, setIsTraining] = useState(false);
 
   const videoRef = useRef(null);
   const imageRef = useRef(null); // For IP Camera
@@ -51,7 +57,7 @@ function Dashboard() {
     return Math.max(0, 100 - (avgDiff / 255 * 100));
   };
 
-  const captureReference = () => {
+  const captureReference = async () => {
     if (!canvasRef.current) return;
     
     let source = null;
@@ -62,36 +68,246 @@ function Dashboard() {
 
     // Capture the current video frame to a hidden canvas
     const canvas = document.createElement('canvas');
-    canvas.width = 100; // Small size for comparison
-    canvas.height = 100;
+    canvas.width = 640; // Standard size
+    canvas.height = 640;
     const ctx = canvas.getContext('2d');
     
     const width = source.videoWidth || source.naturalWidth;
     const height = source.videoHeight || source.naturalHeight;
     
     // Draw the center of the video (assuming object is centered)
-    const size = Math.min(width, height) * 0.6;
+    const size = Math.min(width, height);
     const sx = (width - size) / 2;
     const sy = (height - size) / 2;
     
-    // Use try-catch for CORS issues with IP Camera
     try {
-      ctx.drawImage(source, sx, sy, size, size, 0, 0, 100, 100);
-      const imageData = ctx.getImageData(0, 0, 100, 100);
+      ctx.drawImage(source, sx, sy, size, size, 0, 0, 640, 640);
+      
+      // 1. Update Client-side State
+      const imageData = ctx.getImageData(0, 0, 100, 100); // Small preview
       setReferenceImage(imageData);
       
-      // Show preview
       if (referenceCanvasRef.current) {
         const refCtx = referenceCanvasRef.current.getContext('2d');
         referenceCanvasRef.current.width = 100;
         referenceCanvasRef.current.height = 100;
         refCtx.putImageData(imageData, 0, 0);
       }
+
+      // 2. Send to Backend
+      canvas.toBlob(async (blob) => {
+        const formData = new FormData();
+        formData.append('file', blob, 'reference.jpg');
+        
+        try {
+            const response = await fetch('http://localhost:8000/analysis/set-reference', {
+                method: 'POST',
+                body: formData
+            });
+            if (response.ok) {
+                console.log("Backend reference set!");
+            } else {
+                console.error("Failed to set backend reference");
+            }
+        } catch (err) {
+            console.error("Error sending reference to backend:", err);
+        }
+      }, 'image/jpeg');
+
       console.log("Reference captured!");
     } catch (e) {
       console.error("Error capturing reference (likely CORS):", e);
       alert("Cannot capture reference from IP Camera due to browser security (CORS).");
     }
+  };
+
+  const captureDatasetImage = async (label) => {
+    let source = null;
+    if (cameraMode === 'webcam' && videoRef.current) source = videoRef.current;
+    if (cameraMode === 'ip' && imageRef.current) source = imageRef.current;
+    
+    if (!source) return;
+
+    try {
+        let captureCanvas = document.createElement('canvas');
+        let ctx = captureCanvas.getContext('2d');
+        const width = source.videoWidth || source.naturalWidth;
+        const height = source.videoHeight || source.naturalHeight;
+
+        // 1. Draw full frame first
+        captureCanvas.width = width;
+        captureCanvas.height = height;
+        ctx.drawImage(source, 0, 0, width, height);
+
+        // 2. Auto-Crop Logic
+        if (autoCrop && model) {
+            const predictions = await model.detect(captureCanvas); // Detect on the canvas we just drew
+            
+            // Find largest object
+            let largest = null;
+            let maxArea = 0;
+            predictions.forEach(p => {
+                const area = p.bbox[2] * p.bbox[3]; // width * height
+                if (area > maxArea) {
+                    maxArea = area;
+                    largest = p;
+                }
+            });
+
+            if (largest) {
+                const [x, y, w, h] = largest.bbox;
+                
+                // Add safety padding (25%) to ensure the whole object is captured even if detection is imprecise
+                const padding = Math.max(w, h) * 0.25;
+                const nx = Math.max(0, x - padding);
+                const ny = Math.max(0, y - padding);
+                const nw = Math.min(width - nx, w + padding * 2);
+                const nh = Math.min(height - ny, h + padding * 2);
+
+                // Create new cropped canvas
+                const croppedCanvas = document.createElement('canvas');
+                croppedCanvas.width = 640; // Standardize size
+                croppedCanvas.height = 640;
+                const croppedCtx = croppedCanvas.getContext('2d');
+
+                // Draw cropped region resized to 640x640
+                croppedCtx.drawImage(captureCanvas, nx, ny, nw, nh, 0, 0, 640, 640);
+                
+                // Replace captureCanvas with cropped version
+                captureCanvas = croppedCanvas;
+                console.log(`Auto-cropped object: ${largest.class} (${Math.round(largest.score * 100)}%)`);
+            } else {
+                console.warn("Auto-crop enabled but no object detected. Using full frame.");
+                // Optional: Alert user? For now, just fallback.
+            }
+        }
+
+        captureCanvas.toBlob(async (blob) => {
+            if (!blob) return;
+            
+            const formData = new FormData();
+            formData.append('file', blob, 'capture.jpg');
+            
+            try {
+                const response = await fetch(`http://localhost:8000/dataset/capture/${label}`, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (response.ok) {
+                    // Visual feedback
+                    const btn = document.getElementById(`btn-${label}`);
+                    if(btn) {
+                        const originalText = btn.innerText;
+                        btn.innerText = "SAVED!";
+                        setTimeout(() => btn.innerText = originalText, 1000);
+                    }
+                } else {
+                    alert('Failed to save image.');
+                }
+            } catch (err) {
+                console.error(err);
+                alert('Error connecting to server.');
+            }
+        }, 'image/jpeg');
+    } catch (e) {
+        console.error("Capture Error:", e);
+        alert("Capture failed (CORS or Model error).");
+    }
+  };
+
+  const clearDataset = async () => {
+      if (!confirm("Are you sure you want to delete ALL training images? This cannot be undone.")) return;
+      
+      try {
+          const response = await fetch('http://localhost:8000/dataset/clear', { method: 'DELETE' });
+          if (response.ok) {
+              alert("Dataset cleared! You can now start collecting for a new product.");
+          } else {
+              alert("Failed to clear dataset.");
+          }
+      } catch (e) {
+          console.error("Error clearing dataset:", e);
+          alert("Error clearing dataset.");
+      }
+  };
+
+  const trainModel = async () => {
+      setIsTraining(true);
+      try {
+          const response = await fetch('http://localhost:8000/analysis/train', { method: 'POST' });
+          const data = await response.json();
+          alert(data.message);
+      } catch (e) {
+          alert("Training failed to start: " + e.message);
+      } finally {
+          setIsTraining(false);
+      }
+  };
+
+  const analyzeImage = async () => {
+    let source = null;
+    if (cameraMode === 'webcam' && videoRef.current) source = videoRef.current;
+    if (cameraMode === 'ip' && imageRef.current) source = imageRef.current;
+    
+    if (!source) return;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 640;
+    canvas.height = 640;
+    const ctx = canvas.getContext('2d');
+    
+    const width = source.videoWidth || source.naturalWidth;
+    const height = source.videoHeight || source.naturalHeight;
+    const size = Math.min(width, height);
+    const sx = (width - size) / 2;
+    const sy = (height - size) / 2;
+
+    ctx.drawImage(source, sx, sy, size, size, 0, 0, 640, 640);
+
+    canvas.toBlob(async (blob) => {
+        const formData = new FormData();
+        formData.append('file', blob, 'analyze.jpg');
+        
+        const endpoint = analysisMode === 'ssim' ? 'ssim' : 'cnn';
+        
+        try {
+            const response = await fetch(`http://localhost:8000/analysis/${endpoint}`, {
+                method: 'POST',
+                body: formData
+            });
+            
+            const data = await response.json();
+            
+            if (!response.ok) {
+                throw new Error(data.detail || "Server error");
+            }
+
+            setAnalysisResult(data);
+            
+            // Update Stats
+            setStatus(data.result);
+            setStats(prev => ({
+                ...prev,
+                total: prev.total + 1,
+                pass: data.result === 'PASS' ? prev.pass + 1 : prev.pass,
+                fail: data.result === 'FAIL' ? prev.fail + 1 : prev.fail
+            }));
+
+            // Add to History
+            const newLog = {
+                id: Date.now(),
+                time: new Date().toLocaleTimeString(),
+                status: data.result,
+                confidence: data.score || data.confidence || 0
+            };
+            setHistory(prev => [newLog, ...prev].slice(0, 10));
+
+        } catch (err) {
+            console.error("Analysis failed:", err);
+            alert(`Analysis failed: ${err.message}`);
+        }
+    }, 'image/jpeg');
   };
 
   // Load Model
@@ -312,9 +528,17 @@ function Dashboard() {
           <Activity className="w-8 h-8 text-blue-500" />
           <h1 className="text-2xl font-bold tracking-wider">QC HACKATHON SYSTEM</h1>
         </div>
-        <div className="flex items-center gap-2 text-sm text-slate-400">
-          <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
-          System Online
+        <div className="flex items-center gap-4">
+            <button 
+                onClick={() => onNavigate('annotation')}
+                className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
+            >
+                <Settings size={16} /> Manual Annotation
+            </button>
+            <div className="flex items-center gap-2 text-sm text-slate-400">
+                <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+                System Online
+            </div>
         </div>
       </header>
 
@@ -393,6 +617,59 @@ function Dashboard() {
               </div>
             </div>
           </div>
+
+          {/* Data Collection Section (Moved Here) */}
+          <div className="bg-slate-800 p-6 rounded-xl border border-slate-700">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+                    <Camera className="w-5 h-5 text-blue-400" />
+                    <h2 className="font-semibold">Data Collection</h2>
+                </div>
+                <div className="flex items-center gap-2">
+                    <input 
+                        type="checkbox" 
+                        id="autoCrop"
+                        checked={autoCrop}
+                        onChange={(e) => setAutoCrop(e.target.checked)}
+                        className="rounded bg-slate-700 border-slate-600"
+                    />
+                    <label htmlFor="autoCrop" className="text-xs text-slate-400">
+                        Auto-Crop (Smart Capture)
+                    </label>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <button 
+                  id="btn-good"
+                  onClick={() => captureDatasetImage('good')}
+                  className="py-4 px-4 bg-green-600/20 hover:bg-green-600/30 border border-green-600/50 text-green-400 rounded-xl transition-all flex flex-col items-center justify-center gap-2 group"
+                >
+                  <CheckCircle className="w-8 h-8 group-hover:scale-110 transition-transform" />
+                  <span className="font-bold">Capture GOOD</span>
+                </button>
+                <button 
+                  id="btn-bad"
+                  onClick={() => captureDatasetImage('bad')}
+                  className="py-4 px-4 bg-red-600/20 hover:bg-red-600/30 border border-red-600/50 text-red-400 rounded-xl transition-all flex flex-col items-center justify-center gap-2 group"
+                >
+                  <XCircle className="w-8 h-8 group-hover:scale-110 transition-transform" />
+                  <span className="font-bold">Capture BAD</span>
+                </button>
+              </div>
+              
+              <div className="flex justify-between items-center mt-4 pt-4 border-t border-slate-700">
+                  <p className="text-xs text-slate-500">
+                    Images are automatically processed and saved to the server.
+                  </p>
+                  <button 
+                    onClick={clearDataset}
+                    className="text-xs text-red-400 hover:text-red-300 underline"
+                  >
+                    Clear Dataset
+                  </button>
+              </div>
+            </div>
         </div>
 
         {/* Right Column: Stats & Controls */}
@@ -476,6 +753,62 @@ function Dashboard() {
                       </p>
                   )}
                 </div>
+              )}
+            </div>
+
+            {/* Analysis Mode Section */}
+            <div className="bg-slate-900/50 p-4 rounded-lg border border-slate-700 mb-4">
+              <h3 className="text-sm font-medium text-slate-300 mb-3">Analysis Mode</h3>
+              
+              <div className="flex bg-slate-800 rounded p-1 mb-3">
+                  <button 
+                    onClick={() => setAnalysisMode('ssim')}
+                    className={`flex-1 py-1 text-xs rounded transition-colors ${analysisMode === 'ssim' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'}`}
+                  >
+                    SSIM (Golden Sample)
+                  </button>
+                  <button 
+                    onClick={() => setAnalysisMode('cnn')}
+                    className={`flex-1 py-1 text-xs rounded transition-colors ${analysisMode === 'cnn' ? 'bg-purple-600 text-white' : 'text-slate-400 hover:text-white'}`}
+                  >
+                    CNN (AI Model)
+                  </button>
+              </div>
+
+              {analysisMode === 'cnn' && (
+                  <button 
+                    onClick={trainModel}
+                    disabled={isTraining}
+                    className="w-full py-2 mb-3 bg-slate-700 hover:bg-slate-600 text-white text-xs rounded transition-colors flex items-center justify-center gap-2"
+                  >
+                    {isTraining ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Settings className="w-3 h-3" />}
+                    {isTraining ? "Training..." : "Train Model (from Dataset)"}
+                  </button>
+              )}
+
+              <button 
+                onClick={analyzeImage}
+                className="w-full py-3 bg-blue-500 hover:bg-blue-400 text-white font-bold rounded-lg shadow-lg shadow-blue-500/20 transition-all active:scale-95 flex items-center justify-center gap-2"
+              >
+                <Activity className="w-5 h-5" />
+                TEST PRODUCT
+              </button>
+
+              {analysisResult && (
+                  <div className="mt-3 p-2 bg-slate-800 rounded border border-slate-600 text-xs">
+                      <div className="flex justify-between mb-1">
+                          <span className="text-slate-400">Result:</span>
+                          <span className={`font-bold ${analysisResult.result === 'PASS' ? 'text-green-400' : 'text-red-400'}`}>
+                              {analysisResult.result}
+                          </span>
+                      </div>
+                      <div className="flex justify-between">
+                          <span className="text-slate-400">Score/Conf:</span>
+                          <span className="text-white font-mono">
+                              {((analysisResult.score || analysisResult.confidence || 0) * 100).toFixed(1)}%
+                          </span>
+                      </div>
+                  </div>
               )}
             </div>
 

@@ -27,6 +27,8 @@ A real-time quality control system using a webcam to inspect products. Originall
 - [x] **Core Server**: Initialize FastAPI app.
 - [x] **Database**: Setup SQLite schema (`inspections` table).
 - [x] **Arduino Service**: Created class for Serial communication.
+- [x] **Data Collection**: Implemented `/dataset/capture` endpoints for Good/Bad samples.
+- [x] **System Setup**: Installed `libgl1` for OpenCV support.
 - [ ] **CV Service**: Implement OpenCV video capture loop (Paused for Frontend POC).
 - [ ] **AI Integration**: Load YOLO model (Paused for Frontend POC).
 - [ ] **API Endpoints**: `GET /video_feed`, `GET /history`, etc.

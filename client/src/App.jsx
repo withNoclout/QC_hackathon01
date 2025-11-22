@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import Dashboard from './components/Dashboard';
 import Login from './components/Login';
+import AnnotationTool from './components/AnnotationTool';
 
 const SESSION_TIMEOUT = 5 * 60 * 1000; // 5 minutes in milliseconds
 
@@ -8,8 +9,12 @@ function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
 
+  const [currentView, setCurrentView] = useState('dashboard'); // 'dashboard' | 'annotation'
+  const [streamUrl, setStreamUrl] = useState('http://192.168.1.101/stream'); // Lifted state
+
   const logout = useCallback(() => {
     setIsAuthenticated(false);
+    setCurrentView('dashboard');
     localStorage.removeItem('auth_token');
     localStorage.removeItem('last_activity');
   }, []);
@@ -85,7 +90,18 @@ function App() {
   return (
     <>
       {isAuthenticated ? (
-        <Dashboard />
+        currentView === 'dashboard' ? (
+          <Dashboard 
+            onNavigate={(view) => setCurrentView(view)} 
+            streamUrl={streamUrl}
+            setStreamUrl={setStreamUrl}
+          />
+        ) : (
+          <AnnotationTool 
+            onBack={() => setCurrentView('dashboard')} 
+            streamUrl={streamUrl}
+          />
+        )
       ) : (
         <Login onLogin={handleLogin} />
       )}

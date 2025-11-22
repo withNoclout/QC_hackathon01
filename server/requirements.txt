@@ -3,3 +3,6 @@ uvicorn
 opencv-python
 ultralytics
 pyserial
+python-multipart
+scikit-image
+numpy
